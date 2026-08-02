@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: gymcut
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: UPLOAD_DIR
+        value: /app/uploads
+      - key: OUTPUT_DIR
+        value: /app/outputs
