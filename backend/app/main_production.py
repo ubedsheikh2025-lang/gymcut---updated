@@ -224,7 +224,7 @@ async def process_video(job_id: str):
 # ---------------------------------------------------------------------------
 # Serve frontend static files (MUST be last)
 # ---------------------------------------------------------------------------
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "frontend-out")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend-out")
 if os.path.exists(FRONTEND_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 else:
