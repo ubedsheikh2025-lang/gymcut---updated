@@ -41,7 +41,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,12 +69,7 @@ class JobStatus(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.get("/")
-async def root():
-    return {"service": "Gym Video AI Editor API", "version": "1.0.0"}
-
-
-@app.get("/health")
+@app.get("/api/health")
 async def health():
     """Health check endpoint."""
     ffmpeg_available = shutil.which("ffmpeg") is not None
@@ -250,4 +245,11 @@ async def process_video(job_id: str):
         job["status"] = "failed"
         job["message"] = f"Processing failed: {str(e)}"
         job["progress"] = 0
-        raise
+
+
+# ---------------------------------------------------------------------------
+# Serve frontend static files (MUST be last)
+# ---------------------------------------------------------------------------
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend-out")
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
