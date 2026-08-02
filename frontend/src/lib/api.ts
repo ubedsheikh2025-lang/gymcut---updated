@@ -1,6 +1,4 @@
-"""
-API client for the Gym Video AI Editor backend.
-"""
+// API client for the Gym Video AI Editor backend.
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
