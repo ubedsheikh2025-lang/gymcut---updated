@@ -1,6 +1,6 @@
 // API client for the Gym Video AI Editor backend.
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+const API_BASE = "";
 
 export interface JobStatus {
   job_id: string;
@@ -42,12 +42,28 @@ export async function uploadVideo(
     body: formData,
   });
 
+  // Get the raw text first for debugging
+  const rawText = await response.text();
+  
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || "Upload failed");
+    // Try to parse as JSON, fall back to raw text
+    try {
+      const error = JSON.parse(rawText);
+      throw new Error(error.detail || "Upload failed");
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        throw new Error(`Upload failed (${response.status}): ${rawText.slice(0, 200)}`);
+      }
+      throw e;
+    }
   }
 
-  return response.json();
+  // Parse the success response
+  try {
+    return JSON.parse(rawText);
+  } catch (e) {
+    throw new Error(`Invalid JSON response: ${rawText.slice(0, 200)}`);
+  }
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
@@ -57,7 +73,8 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
     throw new Error("Failed to fetch job status");
   }
 
-  return response.json();
+  const rawText = await response.text();
+  return JSON.parse(rawText);
 }
 
 export function getDownloadUrl(jobId: string): string {
@@ -65,7 +82,7 @@ export function getDownloadUrl(jobId: string): string {
 }
 
 export async function checkHealth(): Promise<{ status: string; ffmpeg: boolean }> {
-  const response = await fetch(`${API_BASE}/health`);
-  return response.json();
+  const response = await fetch(`${API_BASE}/api/health`);
+  const rawText = await response.text();
+  return JSON.parse(rawText);
 }
-
