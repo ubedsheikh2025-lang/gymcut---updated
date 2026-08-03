@@ -28,7 +28,7 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit for free tier
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB limit
 
 # ---------------------------------------------------------------------------
 # Application
@@ -90,7 +90,7 @@ async def upload_video(
 ):
     """
     Upload a gym video for processing.
-    Returns a job_id that can be polled for status.
+    Returns a job_id immediately, processes in background.
     """
     # Validate file type
     allowed_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -101,37 +101,18 @@ async def upload_video(
             detail=f"Unsupported file type: {ext}. Allowed: {', '.join(allowed_extensions)}",
         )
 
-    # Save uploaded file in chunks (memory efficient)
+    # Create job immediately so we can report progress
     job_id = str(uuid.uuid4())
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     input_path = job_dir / f"input{ext}"
 
-    total_size = 0
-    try:
-        with open(input_path, "wb") as buffer:
-            while chunk := await file.read(1024 * 1024):  # 1MB chunks
-                total_size += len(chunk)
-                if total_size > MAX_FILE_SIZE:
-                    buffer.close()
-                    shutil.rmtree(job_dir, ignore_errors=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.",
-                    )
-                buffer.write(chunk)
-    except HTTPException:
-        raise
-    except Exception as e:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-    # Create job
+    # Initialize job with upload progress
     jobs[job_id] = {
         "job_id": job_id,
         "status": "uploading",
-        "progress": 10,
-        "message": "File uploaded. Starting analysis...",
+        "progress": 0,
+        "message": "Starting upload...",
         "output_url": None,
         "highlights": [],
         "input_path": str(input_path),
@@ -139,120 +120,30 @@ async def upload_video(
         "use_ai": use_ai,
         "music_style": music_style,
         "duration_target": duration_target,
+        "file_size": 0,
     }
 
-    # Process in background
-    background_tasks.add_task(process_video, job_id)
+    # Save file in background with progress updates
+    background_tasks.add_task(save_and_process, job_id, file, input_path, job_dir)
 
     return {"job_id": job_id, "status": "uploading"}
 
 
-@app.get("/api/jobs/{job_id}")
-async def get_job_status(job_id: str):
-    """Poll job status."""
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {
-        "job_id": job["job_id"],
-        "status": job["status"],
-        "progress": job["progress"],
-        "message": job["message"],
-        "output_url": job.get("output_url"),
-        "highlights": job.get("highlights", []),
-    }
-
-
-@app.get("/api/jobs/{job_id}/download")
-async def download_video(job_id: str):
-    """Download the edited video."""
-    job = jobs.get(job_id)
-    if not job or job["status"] != "done":
-        raise HTTPException(status_code=404, detail="Video not ready")
-
-    output_path = job.get("output_path")
-    if not output_path or not os.path.exists(output_path):
-        raise HTTPException(status_code=404, detail="Output file not found")
-
-    return FileResponse(
-        output_path,
-        media_type="video/mp4",
-        filename=f"gym-edit-{job_id[:8]}.mp4",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Background Processing (Memory-Optimized)
-# ---------------------------------------------------------------------------
-
-async def process_video(job_id: str):
-    """Main video processing pipeline — uses only FFmpeg, no OpenCV."""
+async def save_and_process(job_id: str, file: UploadFile, input_path: Path, job_dir: Path):
+    """Save uploaded file with progress tracking, then start processing."""
     job = jobs.get(job_id)
     if not job:
         return
 
+    total_size = 0
     try:
-        input_path = job["input_path"]
-        job_dir = job["job_dir"]
-        output_path = str(OUTPUT_DIR / f"{job_id}.mp4")
+        # Get file size if possible
+        file.file.seek(0, 2)  # seek to end
+        file_size = file.file.tell()
+        file.file.seek(0)  # seek back to start
+        job["file_size"] = file_size if file_size > 0 else None
+    except Exception:
+        job["file_size"] = None
 
-        # Step 1: Analyze video using FFmpeg only (no OpenCV)
-        job["status"] = "analyzing"
-        job["progress"] = 20
-        job["message"] = "Analyzing video for highlights..."
-
-        processor = VideoProcessor(input_path)
-        video_info = processor.get_info()
-
-        # Always use FFmpeg scene detection (memory-efficient)
-        job["message"] = "Detecting best moments using scene analysis..."
-        highlights = processor.detect_scene_changes(
-            min_duration=2.0,
-            max_duration=8.0,
-        )
-
-        job["highlights"] = highlights
-        job["progress"] = 50
-
-        # Step 2: Auto-edit
-        job["status"] = "editing"
-        job["message"] = f"Editing {len(highlights)} highlight clips together..."
-
-        editor = AutoEditor()
-        await editor.create_edit(
-            input_path=input_path,
-            highlights=highlights,
-            output_path=output_path,
-            duration_target=job["duration_target"],
-            music_style=job["music_style"],
-        )
-
-        job["progress"] = 80
-
-        # Step 3: Render
-        job["status"] = "rendering"
-        job["message"] = "Rendering final video..."
-        job["progress"] = 95
-
-        # Step 4: Done
-        job["status"] = "done"
-        job["progress"] = 100
-        job["message"] = "Your gym video is ready!"
-        job["output_path"] = output_path
-        job["output_url"] = f"/api/jobs/{job_id}/download"
-
-        # Cleanup upload temp files (keep output)
-        shutil.rmtree(job_dir, ignore_errors=True)
-
-    except Exception as e:
-        job["status"] = "failed"
-        job["message"] = f"Processing failed: {str(e)}"
-        job["progress"] = 0
-
-
-# ---------------------------------------------------------------------------
-# Serve frontend static files (MUST be last)
-# ---------------------------------------------------------------------------
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend-out")
-if os.path.exists(FRONTEND_DIR):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    try:
+        with open(input_path
