@@ -121,7 +121,6 @@ class VideoProcessor:
             return []
 
         segment_length = duration / num_segments
-        # Ensure segment length is within bounds
         segment_length = max(min_duration, min(segment_length, max_duration))
 
         highlights = []
@@ -132,7 +131,7 @@ class VideoProcessor:
                 highlights.append({
                     "start": round(current, 2),
                     "end": round(end, 2),
-                    "score": 0.6,  # moderate score
+                    "score": 0.6,
                 })
             current = end
 
