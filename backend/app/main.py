@@ -1,6 +1,5 @@
 """
-Gym Video AI Editor — Backend API
-FastAPI application with video upload, AI analysis, and auto-editing endpoints.
+Gym Video AI Editor — Backend API (Memory-Optimized for Render Free Tier)
 """
 
 import os
@@ -14,12 +13,11 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.services.video_processor import VideoProcessor
-from app.services.ai_analyzer import AIAnalyzer
 from app.services.auto_editor import AutoEditor
 
 # ---------------------------------------------------------------------------
@@ -29,6 +27,8 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit for free tier
 
 # ---------------------------------------------------------------------------
 # Application
@@ -51,14 +51,14 @@ app.add_middleware(
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
 # ---------------------------------------------------------------------------
-# In-memory job store (replace with DB in production)
+# In-memory job store
 # ---------------------------------------------------------------------------
 jobs: dict = {}
 
 
 class JobStatus(BaseModel):
     job_id: str
-    status: str  # uploading | analyzing | editing | rendering | done | failed
+    status: str
     progress: int = 0
     message: str = ""
     output_url: Optional[str] = None
@@ -101,17 +101,29 @@ async def upload_video(
             detail=f"Unsupported file type: {ext}. Allowed: {', '.join(allowed_extensions)}",
         )
 
-    # Save uploaded file
+    # Save uploaded file in chunks (memory efficient)
     job_id = str(uuid.uuid4())
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     input_path = job_dir / f"input{ext}"
 
+    total_size = 0
     try:
         with open(input_path, "wb") as buffer:
             while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    buffer.close()
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.",
+                    )
                 buffer.write(chunk)
+    except HTTPException:
+        raise
     except Exception as e:
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
     # Create job
@@ -170,11 +182,11 @@ async def download_video(job_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Background Processing
+# Background Processing (Memory-Optimized)
 # ---------------------------------------------------------------------------
 
 async def process_video(job_id: str):
-    """Main video processing pipeline."""
+    """Main video processing pipeline — uses only FFmpeg, no OpenCV."""
     job = jobs.get(job_id)
     if not job:
         return
@@ -184,7 +196,7 @@ async def process_video(job_id: str):
         job_dir = job["job_dir"]
         output_path = str(OUTPUT_DIR / f"{job_id}.mp4")
 
-        # Step 1: Analyze video
+        # Step 1: Analyze video using FFmpeg only (no OpenCV)
         job["status"] = "analyzing"
         job["progress"] = 20
         job["message"] = "Analyzing video for highlights..."
@@ -192,19 +204,12 @@ async def process_video(job_id: str):
         processor = VideoProcessor(input_path)
         video_info = processor.get_info()
 
-        highlights = []
-        if job["use_ai"]:
-            # AI-powered analysis
-            job["message"] = "Running AI detection on your workout..."
-            analyzer = AIAnalyzer()
-            highlights = await analyzer.detect_highlights(input_path)
-        else:
-            # Fallback: scene-change detection
-            job["message"] = "Detecting best moments using scene analysis..."
-            highlights = processor.detect_scene_changes(
-                min_duration=2.0,
-                max_duration=8.0,
-            )
+        # Always use FFmpeg scene detection (memory-efficient)
+        job["message"] = "Detecting best moments using scene analysis..."
+        highlights = processor.detect_scene_changes(
+            min_duration=2.0,
+            max_duration=8.0,
+        )
 
         job["highlights"] = highlights
         job["progress"] = 50
@@ -227,8 +232,6 @@ async def process_video(job_id: str):
         # Step 3: Render
         job["status"] = "rendering"
         job["message"] = "Rendering final video..."
-
-        # Rendering is done inside create_edit; here we just finalize
         job["progress"] = 95
 
         # Step 4: Done
