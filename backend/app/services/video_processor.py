@@ -6,7 +6,6 @@ Handles video info extraction, scene-change detection, and basic transformations
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 
 class VideoProcessor:
@@ -18,10 +17,7 @@ class VideoProcessor:
             raise FileNotFoundError(f"Video not found: {input_path}")
 
     def get_info(self) -> dict:
-        """
-        Extract video metadata using ffprobe.
-        Returns duration, resolution, codec, fps, bitrate.
-        """
+        """Extract video metadata using ffprobe."""
         cmd = [
             "ffprobe",
             "-v", "quiet",
@@ -37,7 +33,6 @@ class VideoProcessor:
 
         data = json.loads(result.stdout)
 
-        # Extract video stream info
         video_stream = None
         for stream in data.get("streams", []):
             if stream.get("codec_type") == "video":
@@ -59,12 +54,13 @@ class VideoProcessor:
 
     def detect_scene_changes(
         self,
-        min_duration: float = 2.0,
-        max_duration: float = 8.0,
-        threshold: float = 0.4,
+        min_duration: float = 1.5,
+        max_duration: float = 6.0,
+        threshold: float = 0.25,
     ) -> list[dict]:
         """
         Detect scene changes using FFmpeg's scene detection filter.
+        If too few changes found, splits video into equal segments.
         Returns a list of highlight segments: [{start, end, score}, ...]
         """
         cmd = [
@@ -90,27 +86,18 @@ class VideoProcessor:
                 except (ValueError, IndexError):
                     continue
 
-        if not scene_times:
-            # No scene changes detected — use the whole video as one highlight
-            info = self.get_info()
-            duration = info["duration"]
-            return [{
-                "start": 0,
-                "end": min(duration, max_duration),
-                "score": 0.5,
-            }]
+        info = self.get_info()
+        duration = info["duration"]
 
         # Build highlight segments from scene changes
         highlights = []
         for i, t in enumerate(scene_times):
-            end = scene_times[i + 1] if i + 1 < len(scene_times) else t + max_duration
+            end = scene_times[i + 1] if i + 1 < len(scene_times) else min(t + max_duration, duration)
             segment_duration = end - t
 
-            # Skip segments that are too short
             if segment_duration < min_duration:
                 continue
 
-            # Cap segment duration
             if segment_duration > max_duration:
                 end = t + max_duration
 
@@ -120,9 +107,36 @@ class VideoProcessor:
                 "score": round(0.5 + (0.5 * (i / max(len(scene_times), 1))), 2),
             })
 
-        # Sort by score descending, take top segments
+        # If we got fewer than 3 highlights, force-split the video into equal parts
+        if len(highlights) < 3:
+            highlights = self._force_split(duration, num_segments=5, min_duration=min_duration, max_duration=max_duration)
+
+        # Sort by score descending, take top 15
         highlights.sort(key=lambda h: h["score"], reverse=True)
-        return highlights[:15]  # Max 15 highlights
+        return highlights[:15]
+
+    def _force_split(self, duration: float, num_segments: int = 5, min_duration: float = 1.5, max_duration: float = 6.0) -> list[dict]:
+        """Split the video into equal segments and return them as highlights."""
+        if duration <= 0:
+            return []
+
+        segment_length = duration / num_segments
+        # Ensure segment length is within bounds
+        segment_length = max(min_duration, min(segment_length, max_duration))
+
+        highlights = []
+        current = 0.0
+        while current < duration:
+            end = min(current + segment_length, duration)
+            if end - current >= min_duration:
+                highlights.append({
+                    "start": round(current, 2),
+                    "end": round(end, 2),
+                    "score": 0.6,  # moderate score
+                })
+            current = end
+
+        return highlights
 
     def trim_segment(
         self,
@@ -131,10 +145,7 @@ class VideoProcessor:
         end: float,
         speed: float = 1.0,
     ) -> bool:
-        """
-        Extract a segment from the video.
-        Optionally apply speed change (1.0 = normal, 2.0 = 2x speed).
-        """
+        """Extract a segment from the video."""
         duration = end - start
         filters = []
 
